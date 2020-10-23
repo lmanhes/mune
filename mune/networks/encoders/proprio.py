@@ -6,7 +6,6 @@ class ProprioceptionEncoder(nn.Module):
 
     def __init__(self, in_features):
         super().__init__()
-
         self.fc = nn.Linear(in_features, 32)
 
     def forward(self, x):

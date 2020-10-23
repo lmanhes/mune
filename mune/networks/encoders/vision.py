@@ -7,7 +7,6 @@ class VisionEncoder(nn.Module):
 
     def __init__(self):
         super().__init__()
-
         self.conv_encoder = nn.Sequential(OrderedDict([
             ('conv1', nn.Conv2d(3, 32, 4, stride=2)),
             ('relu1', nn.ReLU()),
