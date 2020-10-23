@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 
 class FusionLayer(nn.Module):
+
     def __init__(self, in_features):
         super().__init__()
 
@@ -17,9 +18,9 @@ class FusionLayer(nn.Module):
 
 
 if __name__ == "__main__":
-    fusion_layer = FusionLayer(in_features=60016)
+    fusion_layer = FusionLayer(in_features=86528)
     print(fusion_layer)
 
-    x = torch.randn((1, 16))
-    y = torch.randn((1, 60000))
+    x = torch.randn((1, 28))
+    y = torch.randn((1, 86500))
     print(fusion_layer.forward(x, y).shape)
