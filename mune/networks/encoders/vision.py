@@ -16,6 +16,10 @@ class VisionEncoder(nn.Module):
             ('relu3', nn.ReLU())
         ]))
 
+    @property
+    def output_size(self):
+        return self(torch.randn((1, 3, 224, 224))).size(-1)
+
     def forward(self, x):
         x = self.conv_encoder(x)
         return torch.flatten(x, start_dim=1)
@@ -27,3 +31,5 @@ if __name__ == "__main__":
 
     x = torch.randn((1, 3, 224, 224))
     print(encoder.forward(x).shape)
+
+    print(encoder.output_size)
