@@ -1,1 +1,1 @@
-efficientnet-pytorch==0.7.0
+jupyterlab==2.2.9
