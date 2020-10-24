@@ -1,2 +1,2 @@
 # mune
-Multimodal Universal Encoder
+Multimodal Universal Explorer
