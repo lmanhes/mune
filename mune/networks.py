@@ -25,12 +25,12 @@ class ProprioDecoder(nn.Module):
     """
     Decode a temporal multi-modal embedding vector into proprioception sensors values
     """
-    def __init__(self, state_dim, rnn_hidden_dim, out_features):
+    def __init__(self, determ_state_dim, stoch_state_dim, out_features):
         super().__init__()
-        self.fc = nn.Linear(state_dim + rnn_hidden_dim, out_features)
+        self.fc = nn.Linear(determ_state_dim + stoch_state_dim, out_features)
 
-    def forward(self, state, rnn_hidden):
-        return self.fc(torch.cat([state, rnn_hidden], -1))
+    def forward(self, determ_state, stoch_state):
+        return self.fc(torch.cat([determ_state, stoch_state], -1))
 
 
 class VisionEncoder(nn.Module):
@@ -63,10 +63,10 @@ class VisionDecoder(nn.Module):
     """
     Decode multi-modal embedding vector into image observation (3, 64, 64)
     """
-    def __init__(self, state_dim, rnn_hidden_dim):
+    def __init__(self, determ_state_dim, stoch_state_dim):
         super().__init__()
 
-        self.fc_state_rnn = nn.Linear(state_dim + rnn_hidden_dim, 1024)
+        self.fc_deter_stoch = nn.Linear(determ_state_dim + stoch_state_dim, 1024)
 
         self.convt_decoder = nn.Sequential(OrderedDict([
             ('convt1', nn.ConvTranspose2d(1024, 128, 5, stride=2)),
@@ -78,8 +78,8 @@ class VisionDecoder(nn.Module):
             ('convt4', nn.ConvTranspose2d(32, 3, 6, stride=2))
         ]))
 
-    def forward(self, state, rnn_hidden):
-        x = self.fc_state_rnn(torch.cat([state, rnn_hidden], -1))
+    def forward(self, determ_state, stoch_state):
+        x = self.fc_deter_stoch(torch.cat([determ_state, stoch_state], -1))
         x = x.view(x.size(0), 1024, 1, 1)
         return self.convt_decoder(x)
 
@@ -106,42 +106,62 @@ class FusionLayer(nn.Module):
 class Rssm(nn.Module):
     """
     Recurrent state-space model
-
-    Key components:
-        - Posterior dynamics: h_t+1 = f(h_t, s_t, a_t)
-        - Prior dynamics: p(s_t+1 | h_t+1)
-        - Recurrent state model: q(s_t | h_t, o_t)
     """
-    def __init__(self, state_dim, action_dim, rnn_hidden_dim, hidden_dim=200):
+    def __init__(self, emb_dim, action_dim, rnn_hidden_dim=200,
+                 hidden_dim=200, stoch_dim=30, min_stddev=0.1):
         super().__init__()
-        self.state_dim = state_dim
+        self.emb_dim = emb_dim
         self.action_dim = action_dim
         self.rnn_hidden_dim = rnn_hidden_dim
 
-        self.fc_state_action = nn.Linear(state_dim + action_dim, hidden_dim)
-        self.fc_rnn_hidden = nn.Linear(rnn_hidden_dim, hidden_dim)
+        # deterministic
+        self.fc_state_action = nn.Linear(stoch_dim + action_dim, rnn_hidden_dim)
 
-        self.rnn = nn.GRUCell(hidden_dim, rnn_hidden_dim)
+        # prior stochastic
+        #self.fc_prior = nn.Linear(rnn_hidden_dim, hidden_dim)
+        #self.fc_prior_ms = nn.Linear(hidden_dim, 2*stoch_dim)
 
-    def prior(self, state, action, rnn_hidden):
+        # posterior stochastic
+        self.fc_posterior = nn.Linear(rnn_hidden_dim+emb_dim, hidden_dim)
+        self.fc_posterior_ms = nn.Linear(hidden_dim, 2*stoch_dim)
+
+        self.rnn = nn.GRUCell(rnn_hidden_dim, rnn_hidden_dim)
+
+        self.min_stddev = min_stddev
+
+    def deterministic_state(self, state, action, rnn_hidden):
         """
         h_t+1 = f(h_t, s_t, a_t)
-        Compute prior p(s_t+1 | h_t+1)
         """
-        hidden = F.relu(self.fc_state_action(torch.cat([state, action], dim=1)))
-        rnn_hidden = self.rnn(hidden, rnn_hidden)
-        hidden = F.relu(self.fc_rnn_hidden(rnn_hidden))
-        return hidden, rnn_hidden
-        #mean = self.fc_state_mean_prior(hidden)
-        #stddev = F.softplus(self.fc_state_stddev_prior(hidden)) + self._min_stddev
-        #return Normal(mean, stddev), rnn_hidden
+        state_action = F.relu(self.fc_state_action(torch.cat([state, action], dim=1)))
+        return self.rnn(state_action, rnn_hidden)
 
-    def posterior(self, rnn_hidden, embedded_obs):
+    def stochastic_state_prior(self, determ_state):
         """
-        Compute posterior q(s_t | h_t, o_t)
+        s_t ~ p(s_t | h_t)
         """
-        hidden = F.relu(self.fc_rnn_hidden_embedded_obs(
-            torch.cat([rnn_hidden, embedded_obs], dim=1)))
-        mean = self.fc_state_mean_posterior(hidden)
-        stddev = F.softplus(self.fc_state_stddev_posterior(hidden)) + self._min_stddev
+        hidden = F.relu(self.fc_prior(determ_state))
+        mean, stddev = torch.chunk(self.fc_prior_ms(hidden), 2, dim=-1)
+        stddev = F.softplus(stddev) + self.min_stddev
         return Normal(mean, stddev)
+
+    def stochastic_state_posterior(self, rnn_hidden, embed_state):
+        """
+        s'_t ~ p(s'_t | (e_t, h_t))
+        """
+        hidden = F.relu(self.fc_posterior(
+            torch.cat([rnn_hidden, embed_state], dim=1)))
+        mean, stddev = torch.chunk(self.fc_posterior_ms(hidden), 2, dim=-1)
+        stddev = F.softplus(stddev) + self.min_stddev
+        stochastic_state = Normal(mean, stddev).rsample()
+        return mean, stddev, stochastic_state
+
+    def forward(self, embed_state, prev_action, prev_post_state, prev_hidden_state):
+        determ_state = self.deterministic_state(prev_post_state, prev_action, prev_hidden_state)
+        mean, stddev, stoch_state = self.stochastic_state_posterior(determ_state, embed_state)
+        return {
+            "determ_state": determ_state,
+            "stoch_state": stoch_state,
+            "mean": mean,
+            "stddev": stddev
+        }
