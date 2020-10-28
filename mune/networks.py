@@ -231,24 +231,25 @@ class AgentModel(nn.Module):
         self.determ_state_dim = determ_state_dim
         self.stoch_state_dim = stoch_state_dim
 
-        self.modalities = nn.ModuleDict()
+        self.encoder_modalities = nn.ModuleDict()
+        self.decoder_modalities = nn.ModuleDict()
         for m_name, m in modalities_config.items():
             if m['type'] == "proprio":
                 encoder = ProprioEncoder(in_features=m['in_features'])
-                self.modalities.add_module(f'{m_name}_encoder', encoder)
+                self.encoder_modalities.add_module(m_name, encoder)
                 decoder = ProprioDecoder(determ_state_dim=determ_state_dim,
                                          stoch_state_dim=stoch_state_dim,
                                          out_features=m['in_features'])
-                self.modalities.add_module(f'{m_name}_decoder', decoder)
+                self.decoder_modalities.add_module(m_name, decoder)
             elif m['type'] == "vision":
                 encoder = VisionEncoder()
-                self.modalities.add_module(f'{m_name}_encoder', encoder)
+                self.encoder_modalities.add_module(m_name, encoder)
                 decoder = VisionDecoder(determ_state_dim=determ_state_dim,
                                         stoch_state_dim=stoch_state_dim)
-                self.modalities.add_module(f'{m_name}_decoder', decoder)
+                self.decoder_modalities.add_module(m_name, decoder)
 
 
-        embed_dim = sum([m.output_size for name, m in self.modalities.items() if name.endswith('encoder')])
+        embed_dim = sum([m.output_size for name, m in self.encoder_modalities.items()])
         self.fusion_layer = FusionLayer(in_features=embed_dim)
         self.rssm = Rssm(emb_dim=embed_dim,
                          action_dim=action_output_dim,
@@ -275,7 +276,7 @@ class AgentModel(nn.Module):
     def encode_observations(self, observations: dict):
         embeddings = []
         for name, value in observations.items():
-            encoder = self.modalities[f"{name}_encoder"]
+            encoder = self.encoder_modalities[name]
             x = encoder(value)
             embeddings.append(x)
         return self.fusion_layer(torch.cat(embeddings, dim=-1))
