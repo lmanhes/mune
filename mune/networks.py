@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.distributions import Normal
+from torch.distributions import Normal, OneHotCategorical
 from collections import OrderedDict
 
 
@@ -118,8 +118,8 @@ class Rssm(nn.Module):
         self.fc_state_action = nn.Linear(stoch_dim + action_dim, rnn_hidden_dim)
 
         # prior stochastic
-        #self.fc_prior = nn.Linear(rnn_hidden_dim, hidden_dim)
-        #self.fc_prior_ms = nn.Linear(hidden_dim, 2*stoch_dim)
+        self.fc_prior = nn.Linear(rnn_hidden_dim, hidden_dim)
+        self.fc_prior_ms = nn.Linear(hidden_dim, 2*stoch_dim)
 
         # posterior stochastic
         self.fc_posterior = nn.Linear(rnn_hidden_dim+emb_dim, hidden_dim)
@@ -143,7 +143,12 @@ class Rssm(nn.Module):
         hidden = F.relu(self.fc_prior(determ_state))
         mean, stddev = torch.chunk(self.fc_prior_ms(hidden), 2, dim=-1)
         stddev = F.softplus(stddev) + self.min_stddev
-        return Normal(mean, stddev)
+        stoch_sate =  Normal(mean, stddev)
+        return {
+            "stoch_state": stoch_sate,
+            "mean": mean,
+            "stddev": stddev
+        }
 
     def stochastic_state_posterior(self, rnn_hidden, embed_state):
         """
@@ -153,15 +158,127 @@ class Rssm(nn.Module):
             torch.cat([rnn_hidden, embed_state], dim=1)))
         mean, stddev = torch.chunk(self.fc_posterior_ms(hidden), 2, dim=-1)
         stddev = F.softplus(stddev) + self.min_stddev
-        stochastic_state = Normal(mean, stddev).rsample()
-        return mean, stddev, stochastic_state
-
-    def forward(self, embed_state, prev_action, prev_post_state, prev_hidden_state):
-        determ_state = self.deterministic_state(prev_post_state, prev_action, prev_hidden_state)
-        mean, stddev, stoch_state = self.stochastic_state_posterior(determ_state, embed_state)
+        stoch_state = Normal(mean, stddev).rsample()
         return {
-            "determ_state": determ_state,
             "stoch_state": stoch_state,
             "mean": mean,
             "stddev": stddev
         }
+
+    def forward(self, embed_state, prev_action, prev_post_state, prev_hidden_state):
+        determ_state = self.deterministic_state(prev_post_state, prev_action, prev_hidden_state)
+        stoch_state_prior = self.stochastic_state_prior(determ_state)
+        stoch_state_posterior = self.stochastic_state_posterior(determ_state, embed_state)
+        return {
+            "determ_state": determ_state,
+            "stoch_state_prior": stoch_state_prior,
+            "stoch_state_posterior": stoch_state_posterior
+        }
+
+
+class DenseModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, n_layers=1, act=nn.ReLU):
+        super().__init__()
+        self.act = act
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.n_layers = n_layers
+
+        self.model = self._build()
+
+    def _build(self):
+        layers = [nn.Linear(self.input_dim, self.hidden_dim)]
+        for l in range(self.n_layers-1):
+            layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
+            layers.append(self.act())
+        layers.append(nn.Linear(self.hidden_dim, self.output_dim))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class ActionDecoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, n_layers, act=nn.ReLU):
+        super().__init__()
+
+        self.model = DenseModel(input_dim=input_dim,
+                                hidden_dim=hidden_dim,
+                                output_dim=output_dim,
+                                n_layers=n_layers,
+                                act=act)
+
+    def forward(self, x):
+        x = self.model(x)
+        return OneHotCategorical(logits=x)
+
+
+class AgentModel(nn.Module):
+    def __init__(self,
+                 action_output_dim,
+                 modalities_config: dict,
+                 determ_state_dim=200,
+                 stoch_state_dim=30,
+                 min_stddev=0.1,
+                 reward_hidden_dim=100,
+                 reward_n_layers=2,
+                 value_hidden_dim=100,
+                 value_n_layers=2,
+                 action_hidden_dim=100,
+                 action_n_layers=2):
+        super().__init__()
+        self.determ_state_dim = determ_state_dim
+        self.stoch_state_dim = stoch_state_dim
+
+        self.modalities = nn.ModuleDict()
+        for m_name, m in modalities_config.items():
+            if m['type'] == "proprio":
+                encoder = ProprioEncoder(in_features=m['in_features'])
+                self.modalities.add_module(f'{m_name}_encoder', encoder)
+                decoder = ProprioDecoder(determ_state_dim=determ_state_dim,
+                                         stoch_state_dim=stoch_state_dim,
+                                         out_features=m['in_features'])
+                self.modalities.add_module(f'{m_name}_decoder', decoder)
+            elif m['type'] == "vision":
+                encoder = VisionEncoder()
+                self.modalities.add_module(f'{m_name}_encoder', encoder)
+                decoder = VisionDecoder(determ_state_dim=determ_state_dim,
+                                        stoch_state_dim=stoch_state_dim)
+                self.modalities.add_module(f'{m_name}_decoder', decoder)
+
+
+        embed_dim = sum([m.output_size for name, m in self.modalities.items() if name.endswith('encoder')])
+        self.fusion_layer = FusionLayer(in_features=embed_dim)
+        self.rssm = Rssm(emb_dim=embed_dim,
+                         action_dim=action_output_dim,
+                         rnn_hidden_dim=determ_state_dim,
+                         hidden_dim=determ_state_dim,
+                         stoch_dim=stoch_state_dim,
+                         min_stddev=min_stddev)
+
+        self.reward_model = DenseModel(input_dim=determ_state_dim+stoch_state_dim,
+                                       hidden_dim=reward_hidden_dim,
+                                       n_layers=reward_n_layers,
+                                       output_dim=1)
+
+        self.value_model = DenseModel(input_dim=determ_state_dim + stoch_state_dim,
+                                      hidden_dim=value_hidden_dim,
+                                      n_layers=value_n_layers,
+                                      output_dim=1)
+
+        self.action_decoder = ActionDecoder(input_dim=determ_state_dim + stoch_state_dim,
+                                            hidden_dim=action_hidden_dim,
+                                            n_layers=action_n_layers,
+                                            output_dim=action_output_dim)
+
+    def encode_observations(self, observations: dict):
+        embeddings = []
+        for name, value in observations.items():
+            encoder = self.modalities[f"{name}_encoder"]
+            x = encoder(value)
+            embeddings.append(x)
+        return self.fusion_layer(torch.cat(embeddings, dim=-1))
+
+    def forward(self, observations: dict):
+        embed = self.encode_observations(observations)
