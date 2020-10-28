@@ -231,9 +231,7 @@ class AgentModel(nn.Module):
                  action_n_layers=2):
         super().__init__()
         self.modalities_config = modalities_config
-        self.determ_state_dim = determ_state_dim
-        self.stoch_state_dim = stoch_state_dim
-        self.hybrid_state_dim = self.determ_state_dim + self.stoch_state_dim
+        hybrid_state_dim = determ_state_dim + stoch_state_dim
 
         self.encoder_modalities = nn.ModuleDict()
         self.decoder_modalities = nn.ModuleDict()
@@ -241,18 +239,18 @@ class AgentModel(nn.Module):
             if m['type'] == "proprio":
                 encoder = ProprioEncoder(in_features=m['in_features'])
                 self.encoder_modalities.add_module(m_name, encoder)
-                decoder = ProprioDecoder(hybrid_state_dim=self.hybrid_state_dim,
+                decoder = ProprioDecoder(hybrid_state_dim=hybrid_state_dim,
                                          out_features=m['in_features'])
                 self.decoder_modalities.add_module(m_name, decoder)
             elif m['type'] == "vision":
                 encoder = VisionEncoder()
                 self.encoder_modalities.add_module(m_name, encoder)
-                decoder = VisionDecoder(hybrid_state_dim=self.hybrid_state_dim)
+                decoder = VisionDecoder(hybrid_state_dim=hybrid_state_dim)
                 self.decoder_modalities.add_module(m_name, decoder)
-
 
         embed_dim = sum([m.output_size for name, m in self.encoder_modalities.items()])
         self.fusion_layer = FusionLayer(in_features=embed_dim)
+
         self.rssm = Rssm(emb_dim=self.fusion_layer.output_size,
                          action_dim=action_output_dim,
                          rnn_hidden_dim=determ_state_dim,
@@ -260,17 +258,17 @@ class AgentModel(nn.Module):
                          stoch_dim=stoch_state_dim,
                          min_stddev=min_stddev)
 
-        self.reward_model = DenseModel(input_dim=self.hybrid_state_dim,
+        self.reward_model = DenseModel(input_dim=hybrid_state_dim,
                                        hidden_dim=reward_hidden_dim,
                                        n_layers=reward_n_layers,
                                        output_dim=1)
 
-        self.value_model = DenseModel(input_dim=self.hybrid_state_dim,
+        self.value_model = DenseModel(input_dim=hybrid_state_dim,
                                       hidden_dim=value_hidden_dim,
                                       n_layers=value_n_layers,
                                       output_dim=1)
 
-        self.action_decoder = ActionDecoder(input_dim=self.hybrid_state_dim,
+        self.action_decoder = ActionDecoder(input_dim=hybrid_state_dim,
                                             hidden_dim=action_hidden_dim,
                                             n_layers=action_n_layers,
                                             output_dim=action_output_dim)
