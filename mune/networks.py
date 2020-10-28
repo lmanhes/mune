@@ -25,12 +25,12 @@ class ProprioDecoder(nn.Module):
     """
     Decode a temporal multi-modal embedding vector into proprioception sensors values
     """
-    def __init__(self, determ_state_dim, stoch_state_dim, out_features):
+    def __init__(self, hybrid_state_dim, out_features):
         super().__init__()
-        self.fc = nn.Linear(determ_state_dim + stoch_state_dim, out_features)
+        self.fc = nn.Linear(hybrid_state_dim, out_features)
 
-    def forward(self, determ_state, stoch_state):
-        return self.fc(torch.cat([determ_state, stoch_state], -1))
+    def forward(self, hybrid_state):
+        return self.fc(hybrid_state)
 
 
 class VisionEncoder(nn.Module):
@@ -63,10 +63,10 @@ class VisionDecoder(nn.Module):
     """
     Decode multi-modal embedding vector into image observation (3, 64, 64)
     """
-    def __init__(self, determ_state_dim, stoch_state_dim):
+    def __init__(self, hybrid_state_dim):
         super().__init__()
 
-        self.fc_deter_stoch = nn.Linear(determ_state_dim + stoch_state_dim, 1024)
+        self.fc_deter_stoch = nn.Linear(hybrid_state_dim, 1024)
 
         self.convt_decoder = nn.Sequential(OrderedDict([
             ('convt1', nn.ConvTranspose2d(1024, 128, 5, stride=2)),
@@ -78,8 +78,8 @@ class VisionDecoder(nn.Module):
             ('convt4', nn.ConvTranspose2d(32, 3, 6, stride=2))
         ]))
 
-    def forward(self, determ_state, stoch_state):
-        x = self.fc_deter_stoch(torch.cat([determ_state, stoch_state], -1))
+    def forward(self, hybrid_state):
+        x = self.fc_deter_stoch(hybrid_state)
         x = x.view(x.size(0), 1024, 1, 1)
         return self.convt_decoder(x)
 
@@ -129,12 +129,12 @@ class Rssm(nn.Module):
 
         self.min_stddev = min_stddev
 
-    def deterministic_state(self, state, action, rnn_hidden):
+    def deterministic_state(self, prev_stoch_state, prev_action, prev_determ_state):
         """
         h_t+1 = f(h_t, s_t, a_t)
         """
-        state_action = F.relu(self.fc_state_action(torch.cat([state, action], dim=1)))
-        return self.rnn(state_action, rnn_hidden)
+        state_action = F.relu(self.fc_state_action(torch.cat([prev_stoch_state, prev_action], dim=1)))
+        return self.rnn(state_action, prev_determ_state)
 
     def stochastic_state_prior(self, determ_state):
         """
@@ -150,12 +150,12 @@ class Rssm(nn.Module):
             "stddev": stddev
         }
 
-    def stochastic_state_posterior(self, rnn_hidden, embed_state):
+    def stochastic_state_posterior(self, determ_state, embed_state):
         """
         s'_t ~ p(s'_t | (e_t, h_t))
         """
         hidden = F.relu(self.fc_posterior(
-            torch.cat([rnn_hidden, embed_state], dim=1)))
+            torch.cat([determ_state, embed_state], dim=1)))
         mean, stddev = torch.chunk(self.fc_posterior_ms(hidden), 2, dim=-1)
         stddev = F.softplus(stddev) + self.min_stddev
         stoch_state = Normal(mean, stddev).rsample()
@@ -165,14 +165,16 @@ class Rssm(nn.Module):
             "stddev": stddev
         }
 
-    def forward(self, embed_state, prev_action, prev_post_state, prev_hidden_state):
-        determ_state = self.deterministic_state(prev_post_state, prev_action, prev_hidden_state)
+    def forward(self, embed_state, prev_action, prev_stoch_state, prev_determ_state):
+        determ_state = self.deterministic_state(prev_stoch_state, prev_action, prev_determ_state)
         stoch_state_prior = self.stochastic_state_prior(determ_state)
         stoch_state_posterior = self.stochastic_state_posterior(determ_state, embed_state)
+        hybrid_state = torch.cat([determ_state, stoch_state_posterior['stoch_state']], dim=-1)
         return {
             "determ_state": determ_state,
             "stoch_state_prior": stoch_state_prior,
-            "stoch_state_posterior": stoch_state_posterior
+            "stoch_state_posterior": stoch_state_posterior,
+            "hybrid_state": hybrid_state
         }
 
 
@@ -228,8 +230,10 @@ class AgentModel(nn.Module):
                  action_hidden_dim=100,
                  action_n_layers=2):
         super().__init__()
+        self.modalities_config = modalities_config
         self.determ_state_dim = determ_state_dim
         self.stoch_state_dim = stoch_state_dim
+        self.hybrid_state_dim = self.determ_state_dim + self.stoch_state_dim
 
         self.encoder_modalities = nn.ModuleDict()
         self.decoder_modalities = nn.ModuleDict()
@@ -237,38 +241,36 @@ class AgentModel(nn.Module):
             if m['type'] == "proprio":
                 encoder = ProprioEncoder(in_features=m['in_features'])
                 self.encoder_modalities.add_module(m_name, encoder)
-                decoder = ProprioDecoder(determ_state_dim=determ_state_dim,
-                                         stoch_state_dim=stoch_state_dim,
+                decoder = ProprioDecoder(hybrid_state_dim=self.hybrid_state_dim,
                                          out_features=m['in_features'])
                 self.decoder_modalities.add_module(m_name, decoder)
             elif m['type'] == "vision":
                 encoder = VisionEncoder()
                 self.encoder_modalities.add_module(m_name, encoder)
-                decoder = VisionDecoder(determ_state_dim=determ_state_dim,
-                                        stoch_state_dim=stoch_state_dim)
+                decoder = VisionDecoder(hybrid_state_dim=self.hybrid_state_dim)
                 self.decoder_modalities.add_module(m_name, decoder)
 
 
         embed_dim = sum([m.output_size for name, m in self.encoder_modalities.items()])
         self.fusion_layer = FusionLayer(in_features=embed_dim)
-        self.rssm = Rssm(emb_dim=embed_dim,
+        self.rssm = Rssm(emb_dim=self.fusion_layer.output_size,
                          action_dim=action_output_dim,
                          rnn_hidden_dim=determ_state_dim,
                          hidden_dim=determ_state_dim,
                          stoch_dim=stoch_state_dim,
                          min_stddev=min_stddev)
 
-        self.reward_model = DenseModel(input_dim=determ_state_dim+stoch_state_dim,
+        self.reward_model = DenseModel(input_dim=self.hybrid_state_dim,
                                        hidden_dim=reward_hidden_dim,
                                        n_layers=reward_n_layers,
                                        output_dim=1)
 
-        self.value_model = DenseModel(input_dim=determ_state_dim + stoch_state_dim,
+        self.value_model = DenseModel(input_dim=self.hybrid_state_dim,
                                       hidden_dim=value_hidden_dim,
                                       n_layers=value_n_layers,
                                       output_dim=1)
 
-        self.action_decoder = ActionDecoder(input_dim=determ_state_dim + stoch_state_dim,
+        self.action_decoder = ActionDecoder(input_dim=self.hybrid_state_dim,
                                             hidden_dim=action_hidden_dim,
                                             n_layers=action_n_layers,
                                             output_dim=action_output_dim)
@@ -281,5 +283,27 @@ class AgentModel(nn.Module):
             embeddings.append(x)
         return self.fusion_layer(torch.cat(embeddings, dim=-1))
 
-    def forward(self, observations: dict):
-        embed = self.encode_observations(observations)
+    def decode_observations(self, hybrid_state):
+        observations = {}
+        for m_name in self.modalities_config:
+            decoder = self.decoder_modalities[m_name]
+            x = decoder(hybrid_state)
+            observations[m_name] = x
+        return observations
+
+    def forward(self, observations: dict, prev_action, prev_determ_state, prev_stoch_state):
+        embed_state = self.encode_observations(observations)
+
+        transitions = self.rssm(embed_state=embed_state,
+                                prev_action=prev_action,
+                                prev_stoch_state=prev_stoch_state,
+                                prev_determ_state=prev_determ_state)
+        hybrid_state = transitions["hybrid_state"]
+
+        return {
+            "pred_reward": self.reward_model(hybrid_state),
+            "pred_action": self.action_decoder(hybrid_state),
+            "pred_value": self.value_model(hybrid_state),
+            "pred_observations": self.decode_observations(hybrid_state),
+            "transitions": transitions
+        }
