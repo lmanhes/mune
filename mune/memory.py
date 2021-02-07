@@ -1,6 +1,7 @@
 from collections import namedtuple, deque
 import random
 import torch
+import pickle
 import numpy as np
 
 
@@ -10,6 +11,7 @@ class ReplayBuffer(object):
     def __init__(self, buffer_size, batch_size, seed=42, device=None):
 
         self.memory = deque(maxlen=buffer_size)
+        self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
         self.seed = random.seed(seed)
@@ -56,6 +58,17 @@ class ReplayBuffer(object):
         else:
             batch_size = self.batch_size
         return random.sample(self.memory, k=batch_size)
+
+    def save(self, path):
+        pickle.dump([tuple(e) for e in self.memory], open(path, "wb"))
+
+    @classmethod
+    def load(cls, path, **kwargs):
+        replay_buffer = cls(**kwargs)
+        memory = pickle.load(open(path, "rb"))
+        replay_buffer.memory = deque([replay_buffer.experience(*m) for m in memory],
+                                     maxlen=replay_buffer.buffer_size)
+        return replay_buffer
 
     def __len__(self):
         return len(self.memory)
