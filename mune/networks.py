@@ -25,12 +25,12 @@ class ProprioDecoder(nn.Module):
     """
     Decode a temporal multi-modal embedding vector into proprioception sensors values
     """
-    def __init__(self, hybrid_state_dim, out_features):
+    def __init__(self, in_features, out_features):
         super().__init__()
-        self.fc = nn.Linear(hybrid_state_dim, out_features)
+        self.fc = nn.Linear(in_features, out_features)
 
-    def forward(self, hybrid_state):
-        return self.fc(hybrid_state)
+    def forward(self, x):
+        return self.fc(x)
 
 
 class VisionEncoder(nn.Module):
@@ -63,10 +63,10 @@ class VisionDecoder(nn.Module):
     """
     Decode multi-modal embedding vector into image observation (3, 64, 64)
     """
-    def __init__(self, hybrid_state_dim):
+    def __init__(self, in_features):
         super().__init__()
 
-        self.fc_deter_stoch = nn.Linear(hybrid_state_dim, 1024)
+        self.fc_deter_stoch = nn.Linear(in_features, 1024)
 
         self.convt_decoder = nn.Sequential(OrderedDict([
             ('convt1', nn.ConvTranspose2d(1024, 128, 5, stride=2)),
@@ -78,8 +78,8 @@ class VisionDecoder(nn.Module):
             ('convt4', nn.ConvTranspose2d(32, 3, 6, stride=2))
         ]))
 
-    def forward(self, hybrid_state):
-        x = self.fc_deter_stoch(hybrid_state)
+    def forward(self, x):
+        x = self.fc_deter_stoch(x)
         x = x.view(x.size(0), 1024, 1, 1)
         return self.convt_decoder(x)
 
@@ -88,14 +88,15 @@ class FusionLayer(nn.Module):
     """
     Fused multiple vectors from different sensorial modalities into a unique vector (256,)
     """
-    def __init__(self, in_features):
+    def __init__(self, in_features, out_features):
         super().__init__()
         self.fc_1 = nn.Linear(in_features, 512)
-        self.fc_2 = nn.Linear(512, 256)
+        self.fc_2 = nn.Linear(512, out_features)
+        self.out_features = out_features
 
     @property
     def output_size(self):
-        return 256
+        return self.out_features
 
     def forward(self, *inputs):
         x = torch.cat(inputs, -1)
