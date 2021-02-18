@@ -10,6 +10,7 @@ from mune.networks import (
 
 
 class MultimodalBetaVAEConfig:
+
     modalities = {
         "vision": {
             "type": "vision"
