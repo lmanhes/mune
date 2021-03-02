@@ -1,4 +1,4 @@
-from collections import namedtuple, deque
+from collections import namedtuple, deque, defaultdict
 import random
 import torch
 import pickle
@@ -43,12 +43,37 @@ class ReplayBuffer(object):
 
     def separate_out_data_types(self, experiences):
         """Puts the sampled experience into the correct format for a PyTorch neural network"""
-        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(self.device)
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float().to(self.device)
-        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(self.device)
-        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(
-            self.device)
-        dones = torch.from_numpy(np.vstack([int(e.done) for e in experiences if e is not None])).float().to(self.device)
+        #states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(self.device)
+        #actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float().to(self.device)
+        #rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(self.device)
+        #next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(
+        #    self.device)
+        #dones = torch.from_numpy(np.vstack([int(e.done) for e in experiences if e is not None])).float().to(self.device)
+
+        states = defaultdict(list)
+        next_states = defaultdict(list)
+        actions = []
+        rewards = []
+        dones = []
+        for e in experiences:
+            for k, v in e.state.items():
+                if k == "vision":
+                    states[k].append(np.expand_dims(np.transpose(np.array(v), (2, 0, 1)), 0))
+                else:
+                    states[k].append(np.expand_dims(np.array(v), 0))
+            actions.append(np.expand_dims(e.action, 0))
+            rewards.append(np.expand_dims(e.reward, 0))
+            for k, v in e.next_state.items():
+                if k == "vision":
+                    next_states[k].append(np.expand_dims(np.transpose(np.array(v), (2, 0, 1)), 0))
+                else:
+                    next_states[k].append(np.expand_dims(np.array(v), 0))
+            dones.append(np.expand_dims(int(e.done), 0))
+
+        for k, v in states.items():
+            states[k] = torch.from_numpy(np.vstack(v)).float()
+        for k, v in next_states.items():
+            next_states[k] = torch.from_numpy(np.vstack(v)).float()
 
         return states, actions, rewards, next_states, dones
 
