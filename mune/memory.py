@@ -58,14 +58,14 @@ class ReplayBuffer(object):
         for e in experiences:
             for k, v in e.state.items():
                 if k == "vision":
-                    states[k].append(np.expand_dims(np.transpose(np.array(v), (2, 0, 1)), 0))
+                    states[k].append(np.expand_dims(np.array(v), 0))
                 else:
                     states[k].append(np.expand_dims(np.array(v), 0))
             actions.append(np.expand_dims(e.action, 0))
             rewards.append(np.expand_dims(e.reward, 0))
             for k, v in e.next_state.items():
                 if k == "vision":
-                    next_states[k].append(np.expand_dims(np.transpose(np.array(v), (2, 0, 1)), 0))
+                    next_states[k].append(np.expand_dims(np.array(v), 0))
                 else:
                     next_states[k].append(np.expand_dims(np.array(v), 0))
             dones.append(np.expand_dims(int(e.done), 0))
