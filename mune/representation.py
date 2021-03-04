@@ -107,11 +107,11 @@ class MultimodalBetaVAE(nn.Module):
 
         reco_loss = []
         for modality in observations:
-            reco_loss.append(F.mse_loss(reco_observations[modality], observations[modality]))
+            weight = 0.9 if modality == "vision"  else 0.1
+            reco_loss.append(weight * F.mse_loss(reco_observations[modality], observations[modality]))
         reco_loss = torch.mean(torch.stack(reco_loss), dim=0)
 
         kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim=1), dim=0)
-        #loss = reco_loss + self.config.beta * kld_weight * kld_loss
         loss = reco_loss + self.config.beta * kld_loss
 
         return {
