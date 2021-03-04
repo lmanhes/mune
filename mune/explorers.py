@@ -6,11 +6,11 @@ from mune.representation import MultimodalBetaVAE, MultimodalBetaVAEConfig
 
 class AlphaExplorer(object):
 
-    def __init__(self, actions, memory_path):
+    def __init__(self, actions, memory_path, memory_size=30000, batch_size=32):
         self.actions = actions
         self.memory_path = memory_path
 
-        self.memory = ReplayBuffer(buffer_size=3000, batch_size=32)
+        self.memory = ReplayBuffer(buffer_size=memory_size, batch_size=batch_size)
 
         representation_config = MultimodalBetaVAEConfig()
         self.representation_module = MultimodalBetaVAE(config=representation_config)
